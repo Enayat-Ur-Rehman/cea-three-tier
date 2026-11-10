@@ -22,7 +22,7 @@ resource "aws_lb_target_group" "web" {
   health_check {
     path                = "/healthz"
     matcher             = "200"
-    interval            = 15
+    interval            = 10
     healthy_threshold   = 2
     unhealthy_threshold = 3
   }
@@ -82,7 +82,7 @@ resource "aws_lb_target_group" "app" {
   health_check {
     path                = "/api/health"
     matcher             = "200"
-    interval            = 15
+    interval            = 10
     healthy_threshold   = 2
     unhealthy_threshold = 3
   }

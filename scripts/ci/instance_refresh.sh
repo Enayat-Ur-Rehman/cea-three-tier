@@ -1,46 +1,13 @@
 #!/usr/bin/env bash
-# Rolling replacement of every host in each Auto Scaling Group given, one group
-# after the other. New hosts read the release tag from SSM at boot.
-# Skips groups that do not exist yet (first bootstrap run).
+# Rolling replacement of every host in the Auto Scaling Groups given.
+# All groups are refreshed at the same time. Inside each group the new hosts are
+# launched first (MaxHealthyPercentage 200) and the old hosts are removed only
+# after the new ones pass the load balancer health check (MinHealthyPercentage
+# 100), so capacity never drops during a deploy. New hosts read the release tag
+# from SSM at boot. Groups that do not exist yet (first bootstrap run) are skipped.
 set -euo pipefail
 
-refresh() {
-  local asg="$1" found id status
-  found=$(aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$asg" \
-          --query 'length(AutoScalingGroups)' --output text)
-  if [ "$found" = "0" ]; then
-    echo "::warning::$asg does not exist yet (first bootstrap run). Skipping."
-    return 0
-  fi
-
-  # A refresh left running by an earlier failed run would block a new one.
-  id=$(aws autoscaling describe-instance-refreshes --auto-scaling-group-name "$asg" \
-       --query "InstanceRefreshes[?Status=='InProgress' || Status=='Pending'] | [0].InstanceRefreshId" \
-       --output text)
-  if [ "$id" != "None" ] && [ -n "$id" ]; then
-    echo "Cancelling unfinished refresh $id on $asg"
-    cancel_and_wait "$asg"
-  fi
-
-  id=$(aws autoscaling start-instance-refresh --auto-scaling-group-name "$asg" \
-       --preferences '{"MinHealthyPercentage":50,"InstanceWarmup":120}' \
-       --query InstanceRefreshId --output text)
-  echo "Started instance refresh $id on $asg"
-  for _ in $(seq 1 60); do
-    status=$(aws autoscaling describe-instance-refreshes --auto-scaling-group-name "$asg" \
-             --instance-refresh-ids "$id" --query 'InstanceRefreshes[0].Status' --output text)
-    echo "$asg: $status"
-    case "$status" in
-      Successful) return 0 ;;
-      Failed|Cancelled|RollbackSuccessful|RollbackFailed)
-        echo "::error::$asg refresh $status"; return 1 ;;
-    esac
-    sleep 20
-  done
-  echo "::error::Timed out waiting for $asg, cancelling the refresh"
-  cancel_and_wait "$asg"
-  return 1
-}
+PREFS='{"MinHealthyPercentage":100,"MaxHealthyPercentage":200,"InstanceWarmup":30}'
 
 cancel_and_wait() {
   local asg="$1" status
@@ -52,6 +19,51 @@ cancel_and_wait() {
   done
 }
 
+declare -A REFRESH=()
+
 for asg in "$@"; do
-  refresh "$asg"
+  found=$(aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$asg" \
+          --query 'length(AutoScalingGroups)' --output text)
+  if [ "$found" = "0" ]; then
+    echo "::warning::$asg does not exist yet (first bootstrap run). Skipping."
+    continue
+  fi
+  # A refresh left running by an earlier failed run would block a new one.
+  id=$(aws autoscaling describe-instance-refreshes --auto-scaling-group-name "$asg" \
+       --query "InstanceRefreshes[?Status=='InProgress' || Status=='Pending'] | [0].InstanceRefreshId" \
+       --output text)
+  if [ "$id" != "None" ] && [ -n "$id" ]; then
+    echo "Cancelling unfinished refresh $id on $asg"
+    cancel_and_wait "$asg"
+  fi
+  REFRESH[$asg]=$(aws autoscaling start-instance-refresh --auto-scaling-group-name "$asg" \
+                  --preferences "$PREFS" --query InstanceRefreshId --output text)
+  echo "Started instance refresh ${REFRESH[$asg]} on $asg"
 done
+
+[ "${#REFRESH[@]}" -eq 0 ] && exit 0
+
+# Poll all groups together, up to 15 minutes
+for _ in $(seq 1 60); do
+  pending=0
+  for asg in "${!REFRESH[@]}"; do
+    read -r status pct < <(aws autoscaling describe-instance-refreshes --auto-scaling-group-name "$asg" \
+      --instance-refresh-ids "${REFRESH[$asg]}" \
+      --query 'InstanceRefreshes[0].[Status,PercentageComplete]' --output text)
+    echo "$asg: $status ${pct}%"
+    case "$status" in
+      Successful) unset "REFRESH[$asg]" ;;
+      Failed|Cancelled|RollbackSuccessful|RollbackFailed)
+        echo "::error::$asg refresh $status"
+        for other in "${!REFRESH[@]}"; do [ "$other" != "$asg" ] && cancel_and_wait "$other"; done
+        exit 1 ;;
+      *) pending=1 ;;
+    esac
+  done
+  [ "$pending" -eq 0 ] && { echo "All groups refreshed"; exit 0; }
+  sleep 15
+done
+
+echo "::error::Timed out waiting for the refresh, cancelling"
+for asg in "${!REFRESH[@]}"; do cancel_and_wait "$asg"; done
+exit 1

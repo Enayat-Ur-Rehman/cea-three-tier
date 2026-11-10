@@ -17,6 +17,9 @@ name: CI/CD
 on:
   push:
     branches: [main]
+    paths-ignore: # docs-only changes do not need a build or deploy
+      - "**.md"
+      - "docs/**"
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -156,7 +159,7 @@ jobs:
               --value "$IMAGE_TAG" --type String --overwrite
           done
 
-      - name: Rolling replacement (instance refresh), app tier first, then web tier
+      - name: Rolling replacement (instance refresh), both tiers in parallel, new hosts first
         run: bash scripts/ci/instance_refresh.sh "$PROJECT-app-asg" "$PROJECT-web-asg"
 
       - name: Smoke test over HTTPS (CloudFront -> ALB -> web -> app -> RDS over TLS)

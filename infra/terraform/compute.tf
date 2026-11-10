@@ -60,7 +60,7 @@ resource "aws_autoscaling_group" "web" {
   target_group_arns         = [aws_lb_target_group.web.arn]
   health_check_type         = "ELB" # replace hosts the ALB marks unhealthy, not only crashed ones
   health_check_grace_period = 300
-  default_instance_warmup   = 120
+  default_instance_warmup   = 60
 
   launch_template {
     id      = aws_launch_template.web.id
@@ -71,7 +71,9 @@ resource "aws_autoscaling_group" "web" {
   instance_refresh {
     strategy = "Rolling"
     preferences {
-      min_healthy_percentage = 50
+      min_healthy_percentage = 100 # launch new hosts first, keep full capacity
+      max_healthy_percentage = 200
+      instance_warmup        = 30
     }
   }
 
@@ -132,7 +134,7 @@ resource "aws_autoscaling_group" "app" {
   target_group_arns         = [aws_lb_target_group.app.arn]
   health_check_type         = "ELB"
   health_check_grace_period = 300
-  default_instance_warmup   = 120
+  default_instance_warmup   = 60
 
   launch_template {
     id      = aws_launch_template.app.id
@@ -142,7 +144,9 @@ resource "aws_autoscaling_group" "app" {
   instance_refresh {
     strategy = "Rolling"
     preferences {
-      min_healthy_percentage = 50
+      min_healthy_percentage = 100 # launch new hosts first, keep full capacity
+      max_healthy_percentage = 200
+      instance_warmup        = 30
     }
   }
 
