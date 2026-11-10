@@ -15,6 +15,6 @@ app_min       = 2
 app_max       = 4
 
 db_instance_class = "db.t3.micro"
-db_multi_az       = false   # set true to demonstrate DB failover (costs more)
+db_multi_az       = false # set true to demonstrate DB failover (costs more)
 
 # alarm_email = "you@example.com"

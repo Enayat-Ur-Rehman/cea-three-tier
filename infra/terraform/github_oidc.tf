@@ -9,6 +9,7 @@
 
 locals {
   create_github_oidc = local.create_iam && var.github_repo != ""
+  github_sub_prefix  = var.github_oidc_sub_prefix != "" ? var.github_oidc_sub_prefix : "repo:${var.github_repo}"
 }
 
 resource "aws_iam_openid_connect_provider" "github" {
@@ -36,8 +37,12 @@ resource "aws_iam_role" "github_deploy" {
       Condition = {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-          # Only this repository, only the main branch
-          "token.actions.githubusercontent.com:sub" = "repo:${var.github_repo}:ref:refs/heads/main"
+          # Only this repository, only the main branch. New GitHub repositories use
+          # "immutable" subjects that add numeric owner and repo IDs, so both forms are listed.
+          "token.actions.githubusercontent.com:sub" = distinct([
+            "repo:${var.github_repo}:ref:refs/heads/main",
+            "${local.github_sub_prefix}:ref:refs/heads/main",
+          ])
         }
       }
     }]

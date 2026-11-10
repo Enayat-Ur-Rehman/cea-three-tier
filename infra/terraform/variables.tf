@@ -96,3 +96,9 @@ variable "alarm_email" {
   type        = string
   default     = ""
 }
+
+variable "github_oidc_sub_prefix" {
+  description = "OIDC subject prefix of the repository, from: gh api repos/<owner>/<repo>/actions/oidc/customization/sub (sub_claim_prefix). Empty = repo:<github_repo>."
+  type        = string
+  default     = ""
+}
