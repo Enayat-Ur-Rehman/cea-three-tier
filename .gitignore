@@ -1,0 +1,26 @@
+# Secrets
+.env
+*.pem
+terraform.tfvars
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl.bak
+crash.log
+tfplan
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+local-preview.db
+deploy-log-*.txt
+deployment-info.txt
+
+# Local-only artefacts
+*accessKeys*.csv
+*.csv.bak
+loadtest/results/

@@ -1,0 +1,183 @@
+# CI/CD pipeline: test -> build & push to Amazon ECR -> rolling deploy to the EC2 Auto Scaling Groups
+#
+# AWS access uses GitHub OIDC: each run gets short-lived credentials (about 1 hour)
+# by assuming an IAM role that trusts only this repository's main branch.
+# No AWS keys are stored in GitHub.
+#
+# Repository variables (Settings > Secrets and variables > Actions > Variables):
+#   AWS_DEPLOY_ROLE_ARN   output "deploy_role_arn" of Terraform (required for deploys)
+#   AWS_REGION            optional, default us-east-1
+#
+# Releases are immutable: every image is tagged with the git commit SHA only.
+# SSM Parameter Store holds the SHA each tier should run. If the rollout or the
+# smoke test fails, the pipeline restores the previous SHA and rolls back.
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never run two deployments at the same time
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  PROJECT: cea
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  # ------------------------------------------------------------------ 1. TEST
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: app/requirements-dev.txt
+
+      - name: Unit tests (pytest)
+        run: |
+          pip install -r app/requirements-dev.txt
+          pytest -v app/tests
+
+      - name: Start all three tiers (docker compose)
+        run: |
+          # Throwaway credentials, generated per run, never stored in the repo
+          {
+            echo "DB_PASSWORD=$(openssl rand -hex 16)"
+            echo "DB_ROOT_PASSWORD=$(openssl rand -hex 16)"
+          } > .env
+          docker compose up -d --build
+          for _ in $(seq 1 40); do
+            curl -fs http://localhost:8080/api/health/db && break
+            sleep 3
+          done
+
+      - name: End-to-end tests through Nginx (web -> app -> MySQL)
+        run: E2E_BASE_URL=http://localhost:8080 pytest -v tests/e2e
+
+      - name: Network segmentation check (web tier must not reach the database)
+        run: bash scripts/check_segmentation.sh
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # ------------------------------------------------------- 2. BUILD AND PUSH
+  build-and-push:
+    name: Build and push images
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # lets the job request an OIDC token for AWS
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Configure AWS credentials (OIDC, no stored keys)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: cea-build-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      - name: Build and push web and app images (tag = commit SHA)
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          for tier in web app; do
+            IMAGE="$REGISTRY/$PROJECT-$tier"
+            # Tags are immutable in ECR; a re-run of the same commit reuses the image.
+            if aws ecr describe-images --repository-name "$PROJECT-$tier" \
+                 --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
+              echo "$IMAGE:$IMAGE_TAG already exists, skipping build"
+              continue
+            fi
+            docker build -t "$IMAGE:$IMAGE_TAG" "./$tier"
+            docker push "$IMAGE:$IMAGE_TAG"
+          done
+
+  # ---------------------------------------------------------------- 3. DEPLOY
+  deploy:
+    name: Deploy to EC2 Auto Scaling Groups
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Configure AWS credentials (OIDC, no stored keys)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: cea-deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Remember the release that is running now (for rollback)
+        id: previous
+        run: |
+          for tier in web app; do
+            tag=$(aws ssm get-parameter --name "/$PROJECT/$tier/image_tag" \
+                  --query Parameter.Value --output text)
+            echo "$tier=$tag" >> "$GITHUB_OUTPUT"
+            echo "Current $tier release: $tag"
+          done
+
+      - name: Record the new release in SSM Parameter Store
+        run: |
+          # New instances read these tags at boot and pull exactly that image.
+          for tier in web app; do
+            aws ssm put-parameter --name "/$PROJECT/$tier/image_tag" \
+              --value "$IMAGE_TAG" --type String --overwrite
+          done
+
+      - name: Rolling replacement (instance refresh), app tier first, then web tier
+        run: bash scripts/ci/instance_refresh.sh "$PROJECT-app-asg" "$PROJECT-web-asg"
+
+      - name: Smoke test over HTTPS (CloudFront -> ALB -> web -> app -> RDS over TLS)
+        run: bash scripts/ci/smoke_test.sh
+
+      - name: Roll back to the previous release
+        if: failure()
+        env:
+          PREV_WEB: ${{ steps.previous.outputs.web }}
+          PREV_APP: ${{ steps.previous.outputs.app }}
+        run: |
+          set -euo pipefail
+          sha='^[0-9a-f]{40}$'
+          if ! [[ "$PREV_WEB" =~ $sha && "$PREV_APP" =~ $sha ]]; then
+            echo "::error::No earlier release to roll back to (first deploy). Fix the commit and push again."
+            exit 1
+          fi
+          echo "Restoring web=$PREV_WEB app=$PREV_APP"
+          aws ssm put-parameter --name "/$PROJECT/web/image_tag" --value "$PREV_WEB" --type String --overwrite
+          aws ssm put-parameter --name "/$PROJECT/app/image_tag" --value "$PREV_APP" --type String --overwrite
+          bash scripts/ci/instance_refresh.sh "$PROJECT-app-asg" "$PROJECT-web-asg"
+          bash scripts/ci/smoke_test.sh
+          echo "### Rolled back to \`$PREV_APP\` after a failed deploy of \`$IMAGE_TAG\`" >> "$GITHUB_STEP_SUMMARY"
+          exit 1 # the run stays red: the new commit was not deployed

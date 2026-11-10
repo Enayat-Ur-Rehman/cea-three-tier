@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CEA Task Tracker</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>CEA Task Tracker</h1>
+    <p class="sub">Three-tier app on AWS: Nginx (web) &rarr; Flask (app) &rarr; RDS MySQL (database)</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <form id="task-form" autocomplete="off">
+        <input id="task-title" type="text" maxlength="200" placeholder="Add a task..." required>
+        <button type="submit">Add</button>
+      </form>
+      <p id="error" class="error" hidden></p>
+      <ul id="task-list"></ul>
+      <p id="empty" class="muted" hidden>No tasks yet.</p>
+    </section>
+
+    <section class="card">
+      <h2>Request path</h2>
+      <p class="muted">Refresh the page a few times. The load balancers spread requests across instances in two Availability Zones.</p>
+      <table>
+        <thead><tr><th>Tier</th><th>Instance</th><th>AZ</th><th>Version</th></tr></thead>
+        <tbody>
+          <tr><td>Web (Nginx)</td><td id="web-id">-</td><td id="web-az">-</td><td>-</td></tr>
+          <tr><td>App (Flask)</td><td id="app-id">-</td><td id="app-az">-</td><td id="app-ver">-</td></tr>
+          <tr><td>Database</td><td colspan="3" id="db-status">-</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

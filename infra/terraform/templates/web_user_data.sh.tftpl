@@ -1,0 +1,41 @@
+#!/bin/bash
+# Web tier host bootstrap (Amazon Linux 2023). Rendered by Terraform templatefile().
+# Shell variables use $NAME (no braces) so Terraform leaves them alone.
+set -euxo pipefail
+exec > >(tee /var/log/user-data.log) 2>&1
+
+dnf install -y docker
+systemctl enable --now docker
+
+# Instance identity via IMDSv2 (token required)
+TOKEN=$(curl -sfX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+INSTANCE_ID=$(curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+AZ=$(curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+
+# Release version chosen by the CI/CD pipeline
+TAG=$(aws ssm get-parameter --region ${region} --name ${tag_param} --query Parameter.Value --output text)
+IMAGE="${image_repo}:$TAG"
+
+# Pull with retries (ECR login token comes from the instance role, no stored keys)
+for i in $(seq 1 30); do
+  if aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${registry} \
+     && docker pull "$IMAGE"; then
+    break
+  fi
+  echo "pull attempt $i failed, retrying in 20s"
+  sleep 20
+done
+
+docker rm -f web 2>/dev/null || true
+docker run -d --name web --restart unless-stopped \
+  -p 80:8080 \
+  -e APP_HOST=${app_host} \
+  -e APP_PORT=80 \
+  -e NGINX_RESOLVER=${resolver} \
+  -e WEB_INSTANCE_ID="$INSTANCE_ID" \
+  -e WEB_AZ="$AZ" \
+  --log-driver awslogs \
+  --log-opt awslogs-region=${region} \
+  --log-opt awslogs-group=${log_group} \
+  --log-opt awslogs-stream="web-$INSTANCE_ID" \
+  "$IMAGE"

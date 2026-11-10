@@ -1,0 +1,65 @@
+# Web tier: serves the static front end and reverse-proxies /api/ to the
+# application tier. ${VARS} are filled by the nginx image's envsubst step at
+# container start, so the same image runs locally and on AWS.
+
+# Re-resolve the app host every 30 s. On AWS the internal ALB's IPs change,
+# and a fixed upstream would keep using stale addresses.
+resolver ${NGINX_RESOLVER} valid=30s ipv6=off;
+
+# One Cache-Control value per response, set once at server level. (An add_header
+# inside a location would silently drop every server-level header, including
+# the security headers below.) CloudFront honours these values.
+map $uri $cache_control {
+    default                  "no-cache";               # HTML: always revalidate
+    ~*\.(css|js)$            "public, max-age=3600";   # static assets: 1 hour
+    ~^/api/                  "no-store";               # API data: never cache
+    /web-info                "no-store";               # shows which host answered
+    /healthz                 "no-store";
+}
+
+server {
+    listen 8080;
+    server_name _;
+    server_tokens off;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Served-By-Web "${WEB_INSTANCE_ID}" always;
+    add_header Cache-Control $cache_control always;
+
+    gzip on;
+    gzip_types text/css application/javascript application/json;
+
+    # Load-balancer health check (answered by Nginx itself)
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # Which web instance answered (used to show load balancing in the UI)
+    location = /web-info {
+        default_type application/json;
+        return 200 '{"tier":"web","instance_id":"${WEB_INSTANCE_ID}","availability_zone":"${WEB_AZ}"}';
+    }
+
+    location /api/ {
+        set $app_upstream http://${APP_HOST}:${APP_PORT};
+        proxy_pass $app_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 30s;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

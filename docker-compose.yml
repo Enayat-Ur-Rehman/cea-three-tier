@@ -1,0 +1,56 @@
+# Local multi-service run of all three tiers on one machine.
+#   cp .env.example .env    (then edit the passwords)
+#   docker compose up --build
+#   open http://localhost:8080
+# On AWS the database is Amazon RDS instead of the "db" container below.
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:-tasksdb}
+      MYSQL_USER: ${DB_USER:-appuser}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?set DB_ROOT_PASSWORD in .env}
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [backend]          # not on the frontend network: web cannot reach it
+
+  app:
+    build: ./app
+    image: cea-app:local
+    environment:
+      DB_HOST: db
+      DB_PORT: "3306"
+      DB_NAME: ${DB_NAME:-tasksdb}
+      DB_USER: ${DB_USER:-appuser}
+      DB_PASSWORD: ${DB_PASSWORD}
+      APP_VERSION: local
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [frontend, backend]  # bridges web <-> db, like the private app subnet
+
+  web:
+    build: ./web
+    image: cea-web:local
+    environment:
+      APP_HOST: app
+      APP_PORT: "5000"
+      NGINX_RESOLVER: 127.0.0.11   # Docker's embedded DNS
+    ports:
+      - "${WEB_PORT:-8080}:8080"   # only the web tier is published to the host
+    depends_on:
+      - app
+    networks: [frontend]
+
+networks:
+  frontend:
+  backend:
+
+volumes:
+  db-data:

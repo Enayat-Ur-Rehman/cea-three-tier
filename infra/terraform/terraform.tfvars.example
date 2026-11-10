@@ -1,0 +1,20 @@
+# Copy to terraform.tfvars and adjust. terraform.tfvars is git-ignored.
+region  = "us-east-1"
+project = "cea"
+
+# GitHub repository allowed to deploy through OIDC (owner/name). Empty = no deploy role.
+github_repo = ""
+
+# AWS Academy Learner Lab: uncomment the next line (Learner Lab blocks IAM role creation)
+# existing_instance_profile = "LabInstanceProfile"
+
+instance_type = "t3.micro"
+web_min       = 2
+web_max       = 4
+app_min       = 2
+app_max       = 4
+
+db_instance_class = "db.t3.micro"
+db_multi_az       = false   # set true to demonstrate DB failover (costs more)
+
+# alarm_email = "you@example.com"

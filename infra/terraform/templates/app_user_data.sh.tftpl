@@ -1,0 +1,41 @@
+#!/bin/bash
+# App tier host bootstrap (Amazon Linux 2023). Rendered by Terraform templatefile().
+# The database password is NOT in this script: the container reads it from
+# Secrets Manager at start-up using the instance role.
+set -euxo pipefail
+exec > >(tee /var/log/user-data.log) 2>&1
+
+dnf install -y docker
+systemctl enable --now docker
+
+TOKEN=$(curl -sfX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+INSTANCE_ID=$(curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+AZ=$(curl -sf -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+
+TAG=$(aws ssm get-parameter --region ${region} --name ${tag_param} --query Parameter.Value --output text)
+IMAGE="${image_repo}:$TAG"
+
+for i in $(seq 1 30); do
+  if aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${registry} \
+     && docker pull "$IMAGE"; then
+    break
+  fi
+  echo "pull attempt $i failed, retrying in 20s"
+  sleep 20
+done
+
+docker rm -f app 2>/dev/null || true
+docker run -d --name app --restart unless-stopped \
+  -p 5000:5000 \
+  -e AWS_DEFAULT_REGION=${region} \
+  -e DB_SECRET_ARN=${secret_arn} \
+  -e DB_NAME=${db_name} \
+  -e DB_SSL_CA=/etc/ssl/rds/global-bundle.pem \
+  -e INSTANCE_ID="$INSTANCE_ID" \
+  -e AZ="$AZ" \
+  -e APP_VERSION="$TAG" \
+  --log-driver awslogs \
+  --log-opt awslogs-region=${region} \
+  --log-opt awslogs-group=${log_group} \
+  --log-opt awslogs-stream="app-$INSTANCE_ID" \
+  "$IMAGE"
