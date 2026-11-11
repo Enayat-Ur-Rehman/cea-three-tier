@@ -20,6 +20,7 @@ on:
     paths-ignore: # docs-only changes do not need a build or deploy
       - "**.md"
       - "docs/**"
+      - "loadtest/**"
   pull_request:
     branches: [main]
   workflow_dispatch:

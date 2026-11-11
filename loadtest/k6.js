@@ -3,13 +3,14 @@
 //
 //   docker run --rm -i -e BASE_URL=https://<id>.cloudfront.net grafana/k6 run - < loadtest/k6.js
 //
-// setup() seeds tasks so every GET /api/tasks serialises a few hundred rows.
+// Many virtual users with small responses: run from a home connection, large
+// responses run out of bandwidth before the servers run out of CPU.
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 
 const BASE = (__ENV.BASE_URL || 'http://localhost:8080').replace(/\/$/, '');
-const SEED = parseInt(__ENV.SEED || '300', 10);
-const PEAK = parseInt(__ENV.PEAK_VUS || '120', 10);
+const SEED = parseInt(__ENV.SEED || '20', 10);
+const PEAK = parseInt(__ENV.PEAK_VUS || '600', 10);
 const HOLD = __ENV.HOLD || '12m';
 
 export const options = {
@@ -45,7 +46,8 @@ export default function () {
 
 // Remove the seeded rows so the live demo list is clean again.
 export function teardown() {
-  const tasks = http.get(`${BASE}/api/tasks`).json('tasks') || [];
+  const r = http.get(`${BASE}/api/tasks`, { timeout: '120s' });
+  const tasks = r.status === 200 ? r.json('tasks') : [];
   for (const t of tasks) {
     if (String(t.title).startsWith('load-seed-')) {
       http.del(`${BASE}/api/tasks/${t.id}`);
